@@ -1,8 +1,8 @@
 # Germany Facility Detection — Second-Stage Classifier
 
-A second-stage classifier that cleans up a set of prior facility detections for Germany. The priors are candidate locations with a lot of false positives mixed in. This repo trains an MLP on AlphaEarth satellite embeddings to re-score those candidates, runs inference over the whole prior set, and post-processes the raw predictions into per-facility footprints and locator points.
+A second-stage classifier that cleans up a set of prior cattle facility detections for Germany. The priors are candidate locations with significant false positives mixed in. This repo trains an MLP on AlphaEarth satellite embeddings, runs inference over the whole prior set, and post-processes the raw predictions into per-facility footprints and locator points. The original priors were trained using a resolution of 320m x 320m, whereas the AlphaEarth predictions have a resolution of 160m x 160m. 
 
-**tl;dr: precision goes up ~18 points and we keep 90% of the original estimated true positives.**
+**tl;dr: precision goes up ~18 points and we keep 90% of the original estimated true positives while reducing footprint area by almost 43%.**
 
 ## Results
 
