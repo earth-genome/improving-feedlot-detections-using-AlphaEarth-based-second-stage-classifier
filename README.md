@@ -1,8 +1,8 @@
 # Germany Facility Detection — Second-Stage Classifier
 
-A second-stage classifier that cleans up a set of prior cattle facility detections for Germany. The priors are candidate locations with significant false positives mixed in. This repo trains an MLP on AlphaEarth satellite embeddings, runs inference over the whole prior set, and post-processes the raw predictions into per-facility footprints and locator points. The original priors were trained using a resolution of 320m x 320m, whereas the AlphaEarth predictions have a resolution of 160m x 160m. 
+A second-stage classifier that cleans up a set of prior cattle facility detections for Germany. The priors are candidate locations with a lot of false positives mixed in. This repo trains an MLP on AlphaEarth satellite embeddings to re-score those candidates, runs inference over the whole prior set, and post-processes the raw predictions into per-facility footprints and locator points. The original priors were produced at a resolution of 320 m × 320 m; the AlphaEarth predictions work at 160 m × 160 m, so the outputs are both cleaner and tighter.
 
-**tl;dr: precision goes up ~18 points and we keep 90% of the original estimated true positives while reducing footprint area by almost 45%.**
+**tl;dr: precision goes up ~18 points, we keep 90% of the original estimated true positives, and footprint area shrinks by almost 45%.**
 
 ## Results
 
@@ -14,7 +14,7 @@ All precision numbers come from manually validating a random 5% sample at each s
 
 **Extras:** in some priors the classifier predicts more than one facility. The extras are any prediction that isn't the top-probability one in its prior. There are 1,610 of these at prob >= 0.8 — capped at 0.8 since they're by definition not the best prediction in their prior, so they should clear a higher bar. A 5% sample of these came out at 72% precision, ~1,159 TPs and ~451 FPs.
 
-**Adding the extras back in:** 19,900 predictions total, pooled precision 76.07% ((688+56)/(688+56+212+22)) — ~15,138 estimated TPs and ~4,762 FPs. So for a 0.4 point hit to precision we recover a facility count equal to 90% of the original estimated TPs, and FPs are down 61.3% from the priors.
+**Adding the extras back in:** 19,900 predictions total, pooled precision 76.07% — ~15,138 estimated TPs and ~4,762 FPs. So for a 0.4 point hit to precision we recover a facility count equal to 90% of the original estimated TPs, and FPs are down 61.3% from the priors.
 
 | Stage | Predictions | Precision | Est. TPs | Est. FPs |
 |---|---|---|---|---|
@@ -39,22 +39,21 @@ The notebooks in `src/` are numbered in the order they run:
 
 ### `src/` — pipeline code
 
-- `0_gee_data_pull.py` — CLI utility that tiles an AOI geojson and exports rasters from Google Earth Engine to GeoTiffs (AlphaEarth embeddings, Sentinel-1/2, etc.). Resumable: skips tiles already on disk.
-- `1_expert_embeddings.ipynb` — converts a directory of AlphaEarth embedding GeoTiffs into "expert" patch embeddings: for each patch, the mean/std/min/max of every embedding channel concatenated into one long vector (4 × 64 = 256 features). Output is a GeoPackage with one row per patch and its centroid geometry.
-- `2_modeling.ipynb` — trains the classifier. Matches positive and negative labels to their nearest embedding, balances classes to 1:5 pos:neg (topping up with random negatives), builds a spatially aware train/test split (points within 500 m always land in the same partition, so nearby chips can't leak across the split), fits a StandardScaler + MLP pipeline, sweeps thresholds for best F1, then retrains on all data and saves `model/model.pkl` + `model/metrics.json`.
-- `3_inference.ipynb` — runs the model over the raster embeddings for every prior. Each tile is featurized and scored inside a worker process so only rows passing the threshold cross back to the parent — that's what keeps memory flat enough to run fine strides. Writes prediction shapefiles to `inference/stride_{N}/`, then combines stride-16 output (locators) with stride-8 output (footprints).
+- `0_gee_data_pull.py` — CLI utility that takes a polygon/point geojson and exports rasters from Google Earth Engine to GeoTiffs (AlphaEarth embeddings, Sentinel-1/2, etc.). Resumable: skips tiles already on disk. For this project it ran on `pos_labels_orig.gpkg`, the `priors_germany.gpkg` centroids, and `neg_labels_rand.gpkg` to produce their respective GeoTiff folders (not uploaded here due to size constraints).
+- `1_expert_embeddings.ipynb` — converts a directory of AlphaEarth embedding GeoTiffs into "expert" patch embeddings: for each patch, the mean/std/min/max of every embedding channel concatenated into one long vector (4 × 64 = 256 features). Output is a GeoPackage with one row per patch and its centroid geometry. This produced `embeddings/tar_embeddings.gpkg` and `embeddings/neg_rand_embeddings.gpkg` from the GeoTiff folders of `pos_labels_orig.gpkg` and `neg_labels_rand.gpkg` respectively.
+- `2_modeling.ipynb` — trains the classifier. Matches positive and negative labels to their nearest embedding, balances classes to 1:5 pos:neg (topping up with random negatives), builds a spatially aware train/test split (points within 500 m always land in the same partition, so nearby chips can't leak across the split), fits a StandardScaler + MLP pipeline, and sweeps thresholds for best F1 as a starting point for `4_ap_threshold_analysis.ipynb`. Finally it retrains on all data and saves `model/model.pkl`, `model/metrics.json`, and `model/training_predictions.geojson`.
+- `3_inference.ipynb` — runs the model over the raster embeddings of the `priors_germany.gpkg` centroids. Each tile is featurized and scored inside a worker process so only rows passing the threshold cross back to the parent — that's what keeps memory flat enough to run fine strides. Writes prediction shapefiles to `inference/stride_{N}/`, then combines the stride-16 output (locators, in `inference/stride_16/germany/`) with the stride-8 output (footprints; raw stride-8 predictions not uploaded due to size constraints).
 - `4_ap_threshold_analysis.ipynb` — validation analysis on the labeled 5% sample. Part A computes Average Precision and PR curves for the prior score vs. the MLP score. Part B sweeps the locator probability threshold against the shipped post-processed output, reporting precision, estimated TPs, and F1 at each cut.
-- `5_post_process_pipeline.ipynb` — turns raw overlapping prediction cells into final facility polygons: filter by `pred_prob`, extract footprints that overlap locators, dissolve, remove holes, explode to single parts, merge transitively-intersecting groups, attach the max `pred_prob` per polygon, join back to priors, and keep the best polygon per prior. Also writes the "extras" layer — surviving polygons that weren't the best in their prior (or hit no prior at all).
+- `5_post_process_pipeline.ipynb` — turns raw overlapping prediction cells into final facility polygons: filter by `pred_prob` using the threshold picked in `4_ap_threshold_analysis.ipynb`, extract footprints that overlap locators, dissolve, remove holes, explode to single parts, merge transitively-intersecting groups, attach the max `pred_prob` per polygon, join back to priors, and keep the best polygon per prior. Also writes the "extras" layer — surviving polygons that weren't the best in their prior.
 
 ### `gee/` — Earth Engine + tiling library
 
-- `gee.py` — the heavy lifting for Earth Engine work: `DataConfig` (collections, bands, cloud masking), `GEE_Data_Extractor` (composites and concurrent tile downloads), an `InferenceEngine` for embedding-model inference, and a SAM2 wrapper for mask generation. Shared by the data pull script and the notebooks.
-- `tile_utils.py` — tiling helpers: `CenteredTile` (a DLTile-like tile centered on a lat/lon rather than snapped to the global grid), tile generation for arbitrary geometries, and `cut_chips` for slicing rasters into patches.
+- `gee.py` and `tile_utils.py` — the Earth Engine data-extraction and tiling machinery used by `0_gee_data_pull.py` to fetch embeddings.
 
 ### `data/`
 
 - `priors_germany.gpkg` — the 29,133 prior facility candidates for Germany. This is what the whole pipeline is trying to clean up.
-- `embeddings/tar_embeddings.gpkg` — expert embeddings for the targeted (prior) locations. *(Git LFS)*
+- `embeddings/tar_embeddings.gpkg` — expert embeddings for the original positive set, `pos_labels_orig.gpkg`.
 - `embeddings/neg_rand_embeddings.gpkg` — expert embeddings for randomly sampled negative locations.
 - `labels/pos/` — positive ground-truth labels (`pos_labels_tar.gpkg` used for training, `pos_labels_orig.gpkg` the original set).
 - `labels/neg/` — negative labels: `neg_labels_tar.gpkg` (targeted hard negatives) and `neg_labels_rand.gpkg` (random negatives).
@@ -68,13 +67,13 @@ The notebooks in `src/` are numbered in the order they run:
 
 ### `inference/`
 
-- `stride_16/germany/` — raw stride-16 prediction cells over all of Germany (the locator layer). *(Git LFS — large)*
+- `stride_16/germany/` — raw stride-16 prediction cells over all of Germany (the locator layer).
 - `post/germany/` — post-processed outputs:
-  - `footprints.*` — fine-stride prediction polygons (building-footprint scale).
-  - `locators.*` — coarse-stride locator cells.
+  - `footprints.*` — fine-stride (8) prediction polygons (building-footprint scale).
+  - `locators.*` — coarse-stride (16) locator cells.
   - `final.gpkg` — the cleaned output: best polygon per prior.
   - `extras.gpkg` — additional high-probability polygons that weren't the top prediction in their prior.
-  - `final_plus_extras_0.8.gpkg` — final output with extras at prob >= 0.8 merged back in. **This is the headline result: 19,900 predictions at ~76% precision.**
+  - `final_plus_extras_0.8.gpkg` — final output with extras at prob >= 0.8 merged back in. **This is the headline result at ~76% precision.**
 
 ### Other
 
@@ -82,6 +81,6 @@ The notebooks in `src/` are numbered in the order they run:
 
 ## Notes
 
-- Large files (`data/embeddings/tar_embeddings.gpkg`, everything under `inference/stride_16/`) are tracked with Git LFS. Run `git lfs install` before cloning if you want them pulled.
 - `gee.py` initializes Earth Engine against the `embeddings-download` project — you'll need your own EE credentials to run the data pull.
-- Paths inside the notebooks are relative to `src/`, except a couple of absolute paths in `2_modeling.ipynb` and `3_inference.ipynb` you'll want to point at your own copies.
+- `neg_labels_tar.gpkg` and `pos_labels_tar.gpkg` were manually labeled in the vicinity of `embeddings/tar_embeddings.gpkg`. As such, there is no "original targeted negative" dataset.
+- The keen observer may notice that `final_plus_extras_0.8.gpkg` has around 19,725 detections vs. the 19,900 mentioned above. That's because some very close prior detections get merged into one by the AlphaEarth predictions. Since the difference is almost negligible (175), it was ignored in the calculations above.
