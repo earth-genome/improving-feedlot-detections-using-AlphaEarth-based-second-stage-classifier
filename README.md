@@ -62,7 +62,7 @@ The notebooks in `src/` are numbered in the order they run:
 ### `model/`
 
 - `model.pkl` — the final trained pipeline (StandardScaler + MLPClassifier), fit on all labeled data.
-- `metrics.json` — held-out test metrics and the chosen classification threshold (0.45).
+- `metrics.json` — held-out test metrics and the chosen initial classification threshold (0.45).
 - `training_predictions.geojson` — model predictions on every labeled point, tagged train/test, for eyeballing in QGIS.
 
 ### `inference/`
